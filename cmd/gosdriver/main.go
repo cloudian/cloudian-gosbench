@@ -6,67 +6,63 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"math/rand"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/cloudian/cloudian-gosbench/internal/gosbench/common"
 	"github.com/cloudian/cloudian-gosbench/internal/gosbench/driver"
 
-	"github.com/aws/aws-sdk-go/service/s3"
-	log "github.com/sirupsen/logrus"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
 var config common.DriverConf
 var prometheusPort int
 var debug, trace bool
 
-func init() {
-	log.SetFormatter(&log.TextFormatter{
-		FullTimestamp: true,
-	})
-	rand.Seed(time.Now().UnixNano())
-}
-
 func main() {
 	var serverAddress string
 	flag.StringVar(&serverAddress, "s", "", "Gosbench Server IP and Port in the form '192.168.1.1:2000'")
 	var logFile string
 	flag.StringVar(&logFile, "l", "", "file location to write logs output")
-	flag.IntVar(&prometheusPort, "p", 9995, "Port on which the Prometheus Exporter will be available. Default: 9995")
+	flag.IntVar(&prometheusPort, "p", 9295, "Port on which the Prometheus Exporter will be available. Default: 9295")
 	flag.BoolVar(&debug, "d", false, "enable debug log output")
 	flag.BoolVar(&trace, "t", false, "enable trace log output")
 	flag.Parse()
 	if serverAddress == "" {
-		log.Fatal("-s is a mandatory parameter - please specify the server IP and Port")
+		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stdout})
+		log.Fatal().Msg("-s is a mandatory parameter - please specify the server IP and Port")
 	}
 
 	if debug {
-		log.SetLevel(log.DebugLevel)
+		zerolog.SetGlobalLevel(zerolog.DebugLevel)
 	} else if trace {
-		log.SetLevel(log.TraceLevel)
+		zerolog.SetGlobalLevel(zerolog.TraceLevel)
 	} else {
-		log.SetLevel(log.InfoLevel)
+		zerolog.SetGlobalLevel(zerolog.InfoLevel)
 	}
 
 	if logFile != "" {
 		file, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 		if err == nil {
 			defer file.Close()
-			log.SetOutput(file)
+			log.Logger = zerolog.New(file).With().Timestamp().Logger()
 		} else {
-			log.SetOutput(os.Stdout)
-			log.Warn("failed to log to file, using default stdout")
+			log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: time.RFC3339})
+			log.Warn().Err(err).Msg("failed to log to file, using default stdout")
 		}
 	} else {
-		log.SetOutput(os.Stdout)
+		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: time.RFC3339})
 	}
 
 	for {
 		err := connectToServer(serverAddress)
 		if err != nil {
-			log.WithError(err).Error("Issues with server connection")
+			log.Error().Err(err).Msg("Issues with server connection")
 			time.Sleep(time.Second)
 		}
 	}
@@ -90,17 +86,16 @@ func connectToServer(serverAddress string) error {
 	for {
 		err := decoder.Decode(&response)
 		if err != nil {
-			log.WithField("message", response).WithError(err).Error("Server responded unusually - reconnecting")
+			log.Error().Any("message", response).Err(err).Msg("Server responded unusually - reconnecting")
 			conn.Close()
 			return errors.New("issue when receiving work from server")
 		}
-		log.Tracef("Response: %+v", response)
+		log.Trace().Msgf("Response: %+v", response)
 		switch response.Message {
 		case "init":
 			config = *response.Config
-			log.WithField("DriverID", config.DriverID).Info("Got config from server - starting preparations now")
+			log.Info().Str("DriverID", config.DriverID).Msg("Got config from server - starting preparations now")
 
-			driver.RandomData = driver.GenerateRandomBytes(config.Test.Objects.SizeMax)
 			driver.InitS3(*config.S3Config)
 			driver.InitPrometheus(prometheusPort)
 			fillWorkqueue(config.Test, Workqueue, config.DriverID, config.Test.DriversShareBuckets)
@@ -108,23 +103,23 @@ func connectToServer(serverAddress string) error {
 			for _, work := range *Workqueue.Queue {
 				err = work.Prepare()
 				if err != nil {
-					log.WithError(err).Error("Error during work preparation - ignoring")
+					log.Error().Err(err).Msg("Error during work preparation - ignoring")
 				}
 			}
-			log.Info("Preparations finished - waiting on server to start work")
+			log.Info().Msg("Preparations finished - waiting on server to start work")
 			_ = encoder.Encode(common.DriverMessage{Message: "preparations done"})
 		case "start work":
 			if config == (common.DriverConf{}) || len(*Workqueue.Queue) == 0 {
-				log.Fatal("Was instructed to start work - but the preparation step is incomplete - reconnecting")
+				log.Fatal().Msg("Was instructed to start work - but the preparation step is incomplete - reconnecting")
 				return nil
 			}
-			log.Infof("Starting to work on %s", config.Test.Name)
+			log.Info().Msgf("Starting to work on %s", config.Test.Name)
 			duration := PerfTest(config.Test, Workqueue, config.DriverID)
 			benchResults := driver.GetCurrentPromValues(config.Test)
 			benchResults.Duration = duration
 			benchResults.Bandwidth = benchResults.Bytes / duration.Seconds()
 			benchResults.OpsPerSecond = benchResults.Operations / duration.Seconds()
-			log.Infof("PROM VALUES %s, %s, %s, %d, %.2f, %.2f, %.2f, %.2f ops/s, %.2f MB, %.2f MB/s, %.2f ms, %.2f ms, %.2f%%, %.2f s, %s",
+			log.Info().Msgf("PROM VALUES %s, %s, %s, %d, %.2f, %.2f, %.2f, %.2f ops/s, %.2f MB, %.2f MB/s, %.2f ms, %.2f ms, %.2f%%, %.2f s, %s",
 				benchResults.Host, benchResults.TestName, benchResults.OperationName, benchResults.Workers, benchResults.ObjectSize,
 				benchResults.Operations, benchResults.FailedOperations, benchResults.OpsPerSecond, benchResults.Bytes/(1024*1024),
 				benchResults.Bandwidth/(1024*1024), benchResults.RTLatencyAvg, benchResults.TTFBLatencyAvg, benchResults.SuccessRatio*100, benchResults.Duration.Seconds(),
@@ -133,7 +128,7 @@ func connectToServer(serverAddress string) error {
 			// Work is done - return to being a ready driver by reconnecting
 			return nil
 		case "shutdown":
-			log.Info("Server told us to shut down - all work is done for today")
+			log.Info().Msg("Server told us to shut down - all work is done for today")
 			os.Exit(0)
 		}
 	}
@@ -142,7 +137,9 @@ func connectToServer(serverAddress string) error {
 // PerfTest runs a performance test as configured in testConfig
 func PerfTest(testConfig *common.TestCaseConfiguration, Workqueue *driver.Workqueue, driverID string) time.Duration {
 	workChannel := make(chan driver.WorkItem, len(*Workqueue.Queue))
-	doneChannel := make(chan bool)
+	notifyChan := make(chan struct{})
+	wg := &sync.WaitGroup{}
+	wg.Add(testConfig.Workers)
 
 	startTime := time.Now().UTC()
 	driver.PromTestStart.WithLabelValues(testConfig.Name).Set(float64(startTime.UnixNano() / int64(1000000)))
@@ -153,28 +150,26 @@ func PerfTest(testConfig *common.TestCaseConfiguration, Workqueue *driver.Workqu
 	}
 
 	for worker := 0; worker < testConfig.Workers; worker++ {
-		go driver.DoWork(workChannel, doneChannel)
+		go driver.DoWork(workChannel, notifyChan, wg)
 	}
-	log.Infof("Started %d workers", testConfig.Workers)
+	log.Info().Msgf("Started %d workers", testConfig.Workers)
 	if time.Duration(testConfig.Runtime).Seconds() != 0 {
-		workUntilTimeout(Workqueue, workChannel, time.Duration(testConfig.Runtime))
+		workUntilTimeout(Workqueue, workChannel, notifyChan, time.Duration(testConfig.Runtime))
 	} else {
 		workUntilOps(Workqueue, workChannel, testConfig.OpsDeadline, testConfig.Workers)
 	}
 	// Wait for all the goroutines to finish
-	for i := 0; i < testConfig.Workers; i++ {
-		<-doneChannel
-	}
+	wg.Wait()
 	endTime := time.Now().UTC()
 	driver.PromTestEnd.WithLabelValues(testConfig.Name).Set(float64(endTime.UnixNano() / int64(1000000)))
-	log.Info("All clients finished")
+	log.Info().Msg("All clients finished")
 
 	if testConfig.CleanAfter {
-		log.Info("Housekeeping started")
+		log.Info().Msg("Housekeeping started")
 		for _, work := range *Workqueue.Queue {
 			err := work.Clean()
 			if err != nil {
-				log.WithError(err).Error("Error during cleanup - ignoring")
+				log.Error().Err(err).Msg("Error during cleanup - ignoring")
 			}
 		}
 
@@ -192,26 +187,26 @@ func PerfTest(testConfig *common.TestCaseConfiguration, Workqueue *driver.Workqu
 			}
 			err := driver.DeleteBucket(driver.HousekeepingSvc, bucketName)
 			if err != nil {
-				log.WithError(err).Error("Error during bucket deleting - ignoring")
+				log.Error().Err(err).Msg("Error during bucket deleting - ignoring")
 			}
 		}
-		log.Info("Housekeeping finished")
+		log.Info().Msg("Housekeeping finished")
 	}
 	// Sleep to ensure Prometheus can still scrape the last information before we restart the driver
 	time.Sleep(10 * time.Second)
 	return endTime.Sub(startTime)
 }
 
-func workUntilTimeout(Workqueue *driver.Workqueue, workChannel chan driver.WorkItem, runtime time.Duration) {
+func workUntilTimeout(Workqueue *driver.Workqueue, workChannel chan driver.WorkItem, notifyChan chan<- struct{}, runtime time.Duration) {
 	//driver.WorkContext, driver.WorkCancel = context.WithCancel(context.Background())
-	log.Debugf("Work duration = %s", runtime.String())
+	log.Debug().Msgf("Work duration = %s", runtime.String())
 	timer := time.NewTimer(runtime)
 	for {
 		for _, work := range *Workqueue.Queue {
 			select {
 			case <-timer.C:
-				log.Debug("Reached Runtime end")
-				driver.WorkCancel()
+				log.Debug().Msg("Reached Runtime end")
+				close(notifyChan)
 				return
 			case workChannel <- work:
 			}
@@ -235,9 +230,9 @@ func workUntilOps(Workqueue *driver.Workqueue, workChannel chan driver.WorkItem,
 	for {
 		for _, work := range *Workqueue.Queue {
 			if currentOps >= maxOps {
-				log.Debug("Reached OpsDeadline ... waiting for workers to finish")
+				log.Debug().Msg("Reached OpsDeadline ... waiting for workers to finish")
 				for worker := 0; worker < numberOfWorker; worker++ {
-					workChannel <- driver.Stopper{}
+					workChannel <- &driver.Stopper{}
 				}
 				return
 			}
@@ -272,6 +267,9 @@ func fillWorkqueue(testConfig *common.TestCaseConfiguration, Workqueue *driver.W
 	if testConfig.ListWeight > 0 {
 		Workqueue.OperationValues = append(Workqueue.OperationValues, driver.KV{Key: "list"})
 	}
+	if testConfig.ExistingListWeight > 0 {
+		Workqueue.OperationValues = append(Workqueue.OperationValues, driver.KV{Key: "existing_list"})
+	}
 	if testConfig.DeleteWeight > 0 {
 		Workqueue.OperationValues = append(Workqueue.OperationValues, driver.KV{Key: "delete"})
 	}
@@ -293,33 +291,43 @@ func fillWorkqueue(testConfig *common.TestCaseConfiguration, Workqueue *driver.W
 		}
 		err := driver.CreateBucket(driver.HousekeepingSvc, bucketName)
 		if err != nil {
-			log.WithError(err).WithField("bucket", bucketName).Error("Error when creating bucket")
+			log.Error().Err(err).Str("bucket", bucketName).Msg("Error when creating bucket")
 		}
 
 		objectDriverPrefix := fmt.Sprintf("%s-%s", testConfig.ObjectPrefix, driverID)
 
-		var PreExistingReadObjects []*s3.Object
-		var PreExistingReadObjectCount uint64
-		var PreExistingReadObjectIndex uint64
+		var preExistingReadObjects []types.Object
+		var preExistingReadObjectCount uint64
+		var preExistingReadObjectIndex uint64
 		if testConfig.ExistingReadWeight > 0 {
-			PreExistingReadObjects, err = driver.GetExistingReadObjectList(driver.HousekeepingSvc, objectDriverPrefix, bucketName)
-			PreExistingReadObjectCount = uint64(len(PreExistingReadObjects))
-			log.Debugf("Found %d objects in bucket %s with prefix %s to read", PreExistingReadObjectCount, bucketName, objectDriverPrefix)
+			preExistingReadObjects, err = driver.ListObjectsV2(driver.HousekeepingSvc, objectDriverPrefix, bucketName)
+			preExistingReadObjectCount = uint64(len(preExistingReadObjects))
+
 			if err != nil {
-				log.WithError(err).Fatalf("Problems when listing contents of bucket %s to read", bucketName)
+				log.Error().Err(err).Msgf("Problems when listing contents of bucket %s to read", bucketName)
 			}
+			if preExistingReadObjectCount <= 0 {
+				log.Warn().Msgf("There is no objects in bucket %s", bucketName)
+				continue
+			}
+			log.Debug().Msgf("Found %d objects in bucket %s with prefix %s to read", preExistingReadObjectCount, bucketName, objectDriverPrefix)
 		}
 
-		var PreExistingDeleteObjects []*s3.Object
-		var PreExistingDeleteObjectCount uint64
-		var PreExistingDeleteObjectIndex uint64
+		var preExistingDeleteObjects []types.Object
+		var preExistingDeleteObjectCount uint64
+		var preExistingDeleteObjectIndex uint64
 		if testConfig.ExistingDeleteWeight > 0 {
-			PreExistingDeleteObjects, err = driver.GetExistingReadObjectList(driver.HousekeepingSvc, objectDriverPrefix, bucketName)
-			PreExistingDeleteObjectCount = uint64(len(PreExistingDeleteObjects))
-			log.Debugf("Found %d objects in bucket %s with prefix %s to delete", PreExistingDeleteObjectCount, bucketName, objectDriverPrefix)
+			preExistingDeleteObjects, err = driver.ListObjectsV2(driver.HousekeepingSvc, objectDriverPrefix, bucketName)
+			preExistingDeleteObjectCount = uint64(len(preExistingDeleteObjects))
+
 			if err != nil {
-				log.WithError(err).Fatalf("Problems when listing contents of bucket %s to delete", bucketName)
+				log.Error().Err(err).Msgf("Problems when listing contents of bucket %s to delete", bucketName)
 			}
+			if preExistingDeleteObjectCount <= 0 {
+				log.Warn().Msgf("There is no objects in bucket %s", bucketName)
+				continue
+			}
+			log.Debug().Msgf("Found %d objects in bucket %s with prefix %s to delete", preExistingDeleteObjectCount, bucketName, objectDriverPrefix)
 		}
 
 		objectStopCount := testConfig.Objects.NumberMax
@@ -338,9 +346,9 @@ func fillWorkqueue(testConfig *common.TestCaseConfiguration, Workqueue *driver.W
 			case "read":
 				err := driver.IncreaseOperationValue(nextOp, 1/float64(testConfig.ReadWeight), Workqueue)
 				if err != nil {
-					log.WithError(err).Error("Could not increase operational Value - ignoring")
+					log.Error().Err(err).Msg("Could not increase operational Value - ignoring")
 				}
-				new := driver.ReadOperation{
+				new := &driver.ReadOperation{
 					TestName:                 testConfig.Name,
 					Bucket:                   bucketName,
 					ObjectName:               fmt.Sprintf("%s-%d", objectDriverPrefix, objectCount),
@@ -354,29 +362,29 @@ func fillWorkqueue(testConfig *common.TestCaseConfiguration, Workqueue *driver.W
 			case "existing_read":
 				err := driver.IncreaseOperationValue(nextOp, 1/float64(testConfig.ExistingReadWeight), Workqueue)
 				if err != nil {
-					log.WithError(err).Error("Could not increase operational Value - ignoring")
+					log.Error().Err(err).Msg("Could not increase operational Value - ignoring")
 				}
-				if PreExistingReadObjectIndex >= PreExistingReadObjectCount {
-					PreExistingReadObjectIndex = 0
+				if preExistingReadObjectIndex >= preExistingReadObjectCount {
+					preExistingReadObjectIndex = 0
 				}
-				new := driver.ReadOperation{
+				new := &driver.ReadOperation{
 					TestName:                 testConfig.Name,
 					Bucket:                   bucketName,
-					ObjectName:               *PreExistingReadObjects[PreExistingReadObjectIndex].Key,
-					ObjectSize:               uint64(*PreExistingReadObjects[PreExistingReadObjectIndex].Size),
+					ObjectName:               *preExistingReadObjects[preExistingReadObjectIndex].Key,
+					ObjectSize:               uint64(*preExistingReadObjects[preExistingReadObjectIndex].Size),
 					WorksOnPreexistingObject: true,
 					MPUEnabled:               testConfig.Multipart.ReadMPUEnabled,
 					PartSize:                 testConfig.Multipart.ReadPartSize,
 					MPUConcurrency:           testConfig.Multipart.ReadConcurrency,
 				}
-				PreExistingReadObjectIndex++
+				preExistingReadObjectIndex++
 				*Workqueue.Queue = append(*Workqueue.Queue, new)
 			case "write":
 				err := driver.IncreaseOperationValue(nextOp, 1/float64(testConfig.WriteWeight), Workqueue)
 				if err != nil {
-					log.WithError(err).Error("Could not increase operational Value - ignoring")
+					log.Error().Err(err).Msg("Could not increase operational Value - ignoring")
 				}
-				new := driver.WriteOperation{
+				new := &driver.WriteOperation{
 					TestName:       testConfig.Name,
 					Bucket:         bucketName,
 					ObjectName:     fmt.Sprintf("%s-%d", objectDriverPrefix, objectCount),
@@ -389,24 +397,43 @@ func fillWorkqueue(testConfig *common.TestCaseConfiguration, Workqueue *driver.W
 			case "list":
 				err := driver.IncreaseOperationValue(nextOp, 1/float64(testConfig.ListWeight), Workqueue)
 				if err != nil {
-					log.WithError(err).Error("Could not increase operational Value - ignoring")
+					log.Error().Err(err).Msg("Could not increase operational Value - ignoring")
 				}
-				new := driver.ListOperation{
-					TestName:       testConfig.Name,
-					Bucket:         bucketName,
-					ObjectName:     fmt.Sprintf("%s-%d", objectDriverPrefix, objectCount),
-					ObjectSize:     objectSize,
-					MPUEnabled:     testConfig.Multipart.WriteMPUEnabled,
-					PartSize:       testConfig.Multipart.WritePartSize,
-					MPUConcurrency: testConfig.Multipart.WriteConcurrency,
+				new := &driver.ListOperation{
+					TestName:                 testConfig.Name,
+					Bucket:                   bucketName,
+					ObjectName:               fmt.Sprintf("%s-%d", objectDriverPrefix, objectCount),
+					ObjectSize:               objectSize,
+					WorksOnPreexistingObject: false,
+					MPUEnabled:               testConfig.Multipart.WriteMPUEnabled,
+					PartSize:                 testConfig.Multipart.WritePartSize,
+					MPUConcurrency:           testConfig.Multipart.WriteConcurrency,
+					UseV2:                    testConfig.UseV2,
+				}
+				*Workqueue.Queue = append(*Workqueue.Queue, new)
+			case "existing_list":
+				err := driver.IncreaseOperationValue(nextOp, 1/float64(testConfig.ListWeight), Workqueue)
+				if err != nil {
+					log.Error().Err(err).Msg("Could not increase operational Value - ignoring")
+				}
+				new := &driver.ListOperation{
+					TestName:                 testConfig.Name,
+					Bucket:                   bucketName,
+					ObjectName:               fmt.Sprintf("%s-%d", objectDriverPrefix, objectCount),
+					ObjectSize:               objectSize,
+					WorksOnPreexistingObject: true,
+					MPUEnabled:               testConfig.Multipart.WriteMPUEnabled,
+					PartSize:                 testConfig.Multipart.WritePartSize,
+					MPUConcurrency:           testConfig.Multipart.WriteConcurrency,
+					UseV2:                    testConfig.UseV2,
 				}
 				*Workqueue.Queue = append(*Workqueue.Queue, new)
 			case "delete":
 				err := driver.IncreaseOperationValue(nextOp, 1/float64(testConfig.DeleteWeight), Workqueue)
 				if err != nil {
-					log.WithError(err).Error("Could not increase operational Value - ignoring")
+					log.Error().Err(err).Msg("Could not increase operational Value - ignoring")
 				}
-				new := driver.DeleteOperation{
+				new := &driver.DeleteOperation{
 					TestName:                 testConfig.Name,
 					Bucket:                   bucketName,
 					ObjectName:               fmt.Sprintf("%s-%d", objectDriverPrefix, objectCount),
@@ -418,22 +445,22 @@ func fillWorkqueue(testConfig *common.TestCaseConfiguration, Workqueue *driver.W
 				}
 				*Workqueue.Queue = append(*Workqueue.Queue, new)
 			case "existing_delete":
-				err := driver.IncreaseOperationValue(nextOp, 1/float64(testConfig.ExistingReadWeight), Workqueue)
+				err := driver.IncreaseOperationValue(nextOp, 1/float64(testConfig.ExistingDeleteWeight), Workqueue)
 				if err != nil {
-					log.WithError(err).Error("Could not increase operational Value - ignoring")
+					log.Error().Err(err).Msg("Could not increase operational Value - ignoring")
 				}
-				if PreExistingDeleteObjectIndex < PreExistingDeleteObjectCount {
-					new := driver.DeleteOperation{
+				if preExistingDeleteObjectIndex < preExistingDeleteObjectCount {
+					new := &driver.DeleteOperation{
 						TestName:                 testConfig.Name,
 						Bucket:                   bucketName,
-						ObjectName:               *PreExistingDeleteObjects[PreExistingDeleteObjectIndex].Key,
-						ObjectSize:               uint64(*PreExistingDeleteObjects[PreExistingDeleteObjectIndex].Size),
+						ObjectName:               *preExistingDeleteObjects[preExistingDeleteObjectIndex].Key,
+						ObjectSize:               uint64(*preExistingDeleteObjects[preExistingDeleteObjectIndex].Size),
 						WorksOnPreexistingObject: true,
 						MPUEnabled:               testConfig.Multipart.ReadMPUEnabled,
 						PartSize:                 testConfig.Multipart.ReadPartSize,
 						MPUConcurrency:           testConfig.Multipart.ReadConcurrency,
 					}
-					PreExistingDeleteObjectIndex++
+					preExistingDeleteObjectIndex++
 					*Workqueue.Queue = append(*Workqueue.Queue, new)
 				}
 			}

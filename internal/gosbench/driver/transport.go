@@ -6,6 +6,9 @@ import (
 	"time"
 )
 
+// SelfVersion is the git tag version or git short hash
+var SelfVersion string
+
 var CurrentTest string
 
 type Tracker struct {
@@ -34,6 +37,7 @@ type GBTransport struct {
 }
 
 func (gt GBTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.Header.Set("User-Agent", "Cloudian-Gosbench/"+SelfVersion)
 	track := &Tracker{
 		Start:  time.Now(),
 		Method: req.Method,
@@ -45,4 +49,14 @@ func (gt GBTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	req = req.WithContext(httptrace.WithClientTrace(ctx, trace))
 	return gt.Base.RoundTrip(req)
+}
+
+// Housekeeping Transport
+type HKTransport struct {
+	Base http.RoundTripper
+}
+
+func (ht HKTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.Header.Set("User-Agent", "Cloudian-Gosbench/"+SelfVersion)
+	return ht.Base.RoundTrip(req)
 }

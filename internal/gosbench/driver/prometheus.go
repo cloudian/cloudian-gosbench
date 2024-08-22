@@ -10,7 +10,7 @@ import (
 	"contrib.go.opencensus.io/exporter/prometheus"
 	prom "github.com/prometheus/client_golang/prometheus"
 	promModel "github.com/prometheus/client_model/go"
-	log "github.com/sirupsen/logrus"
+	"github.com/rs/zerolog/log"
 )
 
 var pe *prometheus.Exporter
@@ -77,32 +77,32 @@ func init() {
 		Registry: promRegistry,
 	})
 	if err != nil {
-		log.WithError(err).Fatalf("Failed to create the Prometheus exporter:")
+		log.Fatal().Err(err).Msg("Failed to create the Prometheus exporter")
 	}
 
 	if err = promRegistry.Register(PromTestStart); err != nil {
-		log.WithError(err).Error("Issues when adding test_start gauge to Prometheus registry")
+		log.Error().Err(err).Msg("Issues when adding test_start gauge to Prometheus registry")
 	}
 	if err = promRegistry.Register(PromTestEnd); err != nil {
-		log.WithError(err).Error("Issues when adding test_end gauge to Prometheus registry")
+		log.Error().Err(err).Msg("Issues when adding test_end gauge to Prometheus registry")
 	}
 	if err = promRegistry.Register(promFinishedOps); err != nil {
-		log.WithError(err).Error("Issues when adding finished_ops gauge to Prometheus registry")
+		log.Error().Err(err).Msg("Issues when adding finished_ops gauge to Prometheus registry")
 	}
 	if err = promRegistry.Register(promFailedOps); err != nil {
-		log.WithError(err).Error("Issues when adding failed_ops gauge to Prometheus registry")
+		log.Error().Err(err).Msg("Issues when adding failed_ops gauge to Prometheus registry")
 	}
 	if err = promRegistry.Register(promRTLatency); err != nil {
-		log.WithError(err).Error("Issues when adding rt_ops_latency gauge to Prometheus registry")
+		log.Error().Err(err).Msg("Issues when adding rt_ops_latency gauge to Prometheus registry")
 	}
 	if err = promRegistry.Register(promTTFBLatency); err != nil {
-		log.WithError(err).Error("Issues when adding ttfb_ops_latency gauge to Prometheus registry")
+		log.Error().Err(err).Msg("Issues when adding ttfb_ops_latency gauge to Prometheus registry")
 	}
 	if err = promRegistry.Register(promUploadedBytes); err != nil {
-		log.WithError(err).Error("Issues when adding uploaded_bytes gauge to Prometheus registry")
+		log.Error().Err(err).Msg("Issues when adding uploaded_bytes gauge to Prometheus registry")
 	}
 	if err = promRegistry.Register(promDownloadedBytes); err != nil {
-		log.WithError(err).Error("Issues when adding downloaded_bytes gauge to Prometheus registry")
+		log.Error().Err(err).Msg("Issues when adding downloaded_bytes gauge to Prometheus registry")
 	}
 }
 
@@ -116,13 +116,13 @@ func GetCurrentPromValues(testConfig *common.TestCaseConfiguration) common.Bench
 		Host:     host,
 		TestName: testName,
 		OperationName: getOperationName(testConfig.ReadWeight, testConfig.ExistingReadWeight,
-			testConfig.WriteWeight, testConfig.ListWeight, testConfig.DeleteWeight, testConfig.ExistingDeleteWeight),
+			testConfig.WriteWeight, testConfig.ListWeight, testConfig.ExistingListWeight, testConfig.DeleteWeight, testConfig.ExistingDeleteWeight),
 		Workers: testConfig.Workers,
 		Options: getTestOptionString(testConfig),
 	}
 	result, err := promRegistry.Gather()
 	if err != nil {
-		log.WithError(err).Error("ERROR during PROM VALUE gathering")
+		log.Error().Err(err).Msg("ERROR during PROM VALUE gathering")
 	}
 	resultmap := map[string][]*promModel.Metric{}
 	for _, metric := range result {
@@ -164,13 +164,13 @@ func averageHistogramForTest(metrics []*promModel.Metric, testName string) float
 	return sum / count
 }
 
-func getOperationName(readWt int, excistingReadWt int, writeWt int, listWt int, deleteWt int, excistingDeleteWt int) string {
+func getOperationName(readWt int, existingReadWt int, writeWt int, listWt int, existingListWt int, deleteWt int, existingDeleteWt int) string {
 	kvList := make([]KV, 0)
 	if readWt > 0 {
 		kvList = append(kvList, KV{"read", float64(readWt)})
 	}
-	if excistingReadWt > 0 {
-		kvList = append(kvList, KV{"existingRead", float64(excistingReadWt)})
+	if existingReadWt > 0 {
+		kvList = append(kvList, KV{"existingRead", float64(existingReadWt)})
 	}
 	if writeWt > 0 {
 		kvList = append(kvList, KV{"write", float64(writeWt)})
@@ -178,11 +178,14 @@ func getOperationName(readWt int, excistingReadWt int, writeWt int, listWt int, 
 	if listWt > 0 {
 		kvList = append(kvList, KV{"list", float64(listWt)})
 	}
+	if existingListWt > 0 {
+		kvList = append(kvList, KV{"existingList", float64(existingListWt)})
+	}
 	if deleteWt > 0 {
 		kvList = append(kvList, KV{"delete", float64(deleteWt)})
 	}
-	if excistingDeleteWt > 0 {
-		kvList = append(kvList, KV{"existingDelete", float64(excistingDeleteWt)})
+	if existingDeleteWt > 0 {
+		kvList = append(kvList, KV{"existingDelete", float64(existingDeleteWt)})
 	}
 
 	if len(kvList) == 0 {

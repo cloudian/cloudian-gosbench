@@ -10,7 +10,7 @@ import (
 
 	"gopkg.in/yaml.v2"
 
-	log "github.com/sirupsen/logrus"
+	"github.com/rs/zerolog/log"
 )
 
 // This uses the Base 2 calculation where
@@ -80,10 +80,12 @@ type TestCaseConfiguration struct {
 	DriversShareBuckets  bool     `yaml:"drivers_share_buckets" json:"drivers_share_buckets"`
 	Workers              int      `yaml:"workers" json:"workers"`
 	CleanAfter           bool     `yaml:"clean_after" json:"clean_after"`
+	UseV2                bool     `yaml:"use_v2" json:"use_v2"`
 	ReadWeight           int      `yaml:"read_weight" json:"read_weight"`
 	ExistingReadWeight   int      `yaml:"existing_read_weight" json:"existing_read_weight"`
 	WriteWeight          int      `yaml:"write_weight" json:"write_weight"`
 	ListWeight           int      `yaml:"list_weight" json:"list_weight"`
+	ExistingListWeight   int      `yaml:"existing_list_weight" json:"existing_list_weight"`
 	DeleteWeight         int      `yaml:"delete_weight" json:"delete_weight"`
 	ExistingDeleteWeight int      `yaml:"existing_delete_weight" json:"existing_delete_weight"`
 }
@@ -142,12 +144,12 @@ type DriverMessage struct {
 }
 
 // CheckConfig checks the global config
-func CheckConfig(config Testconf) {
+func CheckConfig(config *Testconf) {
 	for _, testcase := range config.Tests {
 		// log.Debugf("Checking testcase with prefix %s", testcase.BucketPrefix)
 		err := checkTestCase(testcase)
 		if err != nil {
-			log.WithError(err).Fatalf("Issue detected when scanning through the config file:")
+			log.Fatal().Err(err).Msg("Issue detected when scanning through the config file")
 		}
 	}
 }
@@ -157,11 +159,14 @@ func checkTestCase(testcase *TestCaseConfiguration) error {
 		return fmt.Errorf("either stop_with_runtime or stop_with_ops needs to be set")
 	}
 	if testcase.ReadWeight == 0 && testcase.WriteWeight == 0 && testcase.ListWeight == 0 &&
-		testcase.DeleteWeight == 0 && testcase.ExistingReadWeight == 0 && testcase.ExistingDeleteWeight == 0 {
+		testcase.DeleteWeight == 0 && testcase.ExistingReadWeight == 0 && testcase.ExistingDeleteWeight == 0 && testcase.ExistingListWeight == 0 {
 		return fmt.Errorf("at least one weight needs to be set - Read / Write / List / Delete")
 	}
 	if testcase.ExistingReadWeight != 0 && testcase.BucketPrefix == "" {
 		return fmt.Errorf("when using existing_read_weight, setting the bucket_prefix is mandatory")
+	}
+	if testcase.ExistingListWeight != 0 && testcase.BucketPrefix == "" {
+		return fmt.Errorf("when using existing_list_weight, setting the bucket_prefix is mandatory")
 	}
 	if testcase.Buckets.NumberMin == 0 {
 		return fmt.Errorf("please set minimum number of Buckets")
@@ -224,7 +229,6 @@ func EvaluateDistribution(min uint64, max uint64, lastNumber *uint64, increment 
 	case "constant":
 		return min
 	case "random":
-		rand.Seed(time.Now().UnixNano())
 		validSize := max - min
 		return ((rand.Uint64() % validSize) + min)
 	case "sequential":
@@ -266,9 +270,10 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 		return err
 	}
 	switch value := v.(type) {
+	case int:
+		*d = Duration(time.Duration(value))
 	case float64:
 		*d = Duration(time.Duration(value))
-		return nil
 	case string:
 		tmp, err := time.ParseDuration(value)
 		if err != nil {
@@ -279,6 +284,7 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 	default:
 		return errors.New("invalid duration")
 	}
+	return nil
 }
 
 func (d Duration) MarshalYAML() ([]byte, error) {
@@ -286,12 +292,25 @@ func (d Duration) MarshalYAML() ([]byte, error) {
 }
 
 func (d *Duration) UnmarshalYAML(unmarshal func(interface{}) error) error {
-	var yamlDuration time.Duration
-	err := unmarshal(yamlDuration)
+	var v interface{}
+	err := unmarshal(&v)
 	if err != nil {
 		return err
 	}
 
-	*d = Duration(yamlDuration)
+	switch value := v.(type) {
+	case int:
+		*d = Duration(time.Duration(value))
+	case float64:
+		*d = Duration(time.Duration(value))
+	case string:
+		tmp, err := time.ParseDuration(value)
+		if err != nil {
+			return err
+		}
+		*d = Duration(tmp)
+	default:
+		return errors.New("invalid duration")
+	}
 	return nil
 }

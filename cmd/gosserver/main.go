@@ -5,9 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"math"
-	"math/rand"
 	"net"
 	"os"
 	"path/filepath"
@@ -19,15 +17,13 @@ import (
 
 	"gopkg.in/yaml.v2"
 
-	log "github.com/sirupsen/logrus"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
 func init() {
-	log.SetFormatter(&log.TextFormatter{
-		FullTimestamp: true,
-	})
-	log.SetOutput(os.Stdout)
-	rand.Seed(time.Now().UnixNano())
+
+	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: time.RFC3339})
 
 	flag.StringVar(&configFileLocation, "c", "", "Config file describing test run")
 	flag.StringVar(&s3FileLocation, "s", "", "S3 configuration information")
@@ -38,14 +34,15 @@ func init() {
 	flag.Parse()
 	// Only demand this flag if we are not running go test
 	if configFileLocation == "" && flag.Lookup("test.v") == nil {
-		log.Fatal("-c is a mandatory parameter - please specify the config file")
+		log.Fatal().Msg("-c is a mandatory parameter - please specify the config file")
 	}
+
 	if debug {
-		log.SetLevel(log.DebugLevel)
+		zerolog.SetGlobalLevel(zerolog.DebugLevel)
 	} else if trace {
-		log.SetLevel(log.TraceLevel)
+		zerolog.SetGlobalLevel(zerolog.TraceLevel)
 	} else {
-		log.SetLevel(log.InfoLevel)
+		zerolog.SetGlobalLevel(zerolog.InfoLevel)
 	}
 }
 
@@ -65,51 +62,51 @@ func loadS3ConfigFromFile(s3FileContent []byte) []*common.S3Configuration {
 	if strings.HasSuffix(s3FileLocation, ".yaml") {
 		err = yaml.Unmarshal(s3FileContent, &s3Config)
 		if err != nil {
-			log.WithError(err).Fatalf("Error unmarshaling yaml s3 config file:")
+			log.Fatal().Err(err).Msgf("Error unmarshaling yaml s3 config file: %s", s3FileLocation)
 		}
 	} else if strings.HasSuffix(s3FileLocation, ".json") {
 		err = json.Unmarshal(s3FileContent, &s3Config)
 		if err != nil {
-			log.WithError(err).Fatalf("Error unmarshaling json S3 config file:")
+			log.Fatal().Err(err).Msgf("Error unmarshalling json S3 config file: %s", s3FileLocation)
 		}
 	} else {
-		log.WithError(err).Fatalf("S3 configuration file must be a yaml or json formatted file")
+		log.Fatal().Err(err).Msg("S3 configuration file must be a yaml or json formatted file")
 	}
 	return s3Config
 }
 
-func loadConfigFromFile(configFileContent []byte) common.Workloadconf {
+func loadConfigFromFile(configFileContent []byte) *common.Workloadconf {
 	var workload common.Workloadconf
 	var err error
 
 	if strings.HasSuffix(configFileLocation, ".yaml") {
 		err = yaml.Unmarshal(configFileContent, &workload)
 		if err != nil {
-			log.WithError(err).Fatalf("Error unmarshaling yaml config file:")
+			log.Fatal().Err(err).Msgf("Error unmarshaling yaml config file: %s", configFileLocation)
 		}
 	} else if strings.HasSuffix(configFileLocation, ".json") {
 		err = json.Unmarshal(configFileContent, &workload)
 		if err != nil {
-			log.WithError(err).Fatalf("Error unmarshaling json config file:")
+			log.Fatal().Err(err).Msgf("Error unmarshaling json config file: %s", configFileLocation)
 		}
 	} else {
-		log.WithError(err).Fatalf("Configuration file must be a yaml or json formatted file")
+		log.Fatal().Msg("Configuration file must be a yaml or json formatted file")
 	}
-	return workload
+	return &workload
 }
 
 func main() {
 
-	configFileContent, err := ioutil.ReadFile(configFileLocation)
+	configFileContent, err := os.ReadFile(configFileLocation)
 	if err != nil {
-		log.WithError(err).Fatalf("Error reading workload config file:")
+		log.Fatal().Err(err).Msgf("Error reading workload config file: %s", configFileLocation)
 	}
 
 	workload := loadConfigFromFile(configFileContent)
 
-	s3FileContent, err := ioutil.ReadFile(s3FileLocation)
+	s3FileContent, err := os.ReadFile(s3FileLocation)
 	if err != nil {
-		log.WithError(err).Fatalf("Error reading S3vconfig file:")
+		log.Fatal().Err(err).Msgf("Error reading S3config file: %s", s3FileLocation)
 	}
 
 	s3Config := loadS3ConfigFromFile(s3FileContent)
@@ -120,7 +117,7 @@ func main() {
 		Tests:         workload.Tests,
 	}
 
-	common.CheckConfig(config)
+	common.CheckConfig(&config)
 
 	readyDrivers = make(chan *net.Conn)
 	defer close(readyDrivers)
@@ -129,9 +126,9 @@ func main() {
 	// anycast IP addresses of the local system.
 	listener, err = net.Listen("tcp", fmt.Sprintf(":%d", serverPort))
 	if err != nil {
-		log.WithError(err).Fatal("Could not open port!")
+		log.Fatal().Err(err).Msg("Could not open port!")
 	}
-	log.Info("Ready to accept connections")
+	log.Info().Msg("Ready to accept connections")
 	go scheduleTests(config)
 	for {
 		// Wait for a connection.
@@ -140,23 +137,23 @@ func main() {
 			break
 		}
 		if err != nil {
-			log.WithError(err).Fatal("Issue when waiting for connection of clients")
+			log.Fatal().Err(err).Msg("Issue when waiting for connection of clients")
 		}
 		// Handle the connection in a new goroutine.
 		// The loop then returns to accepting, so that
 		// multiple connections may be served concurrently.
 		go func(c *net.Conn) {
-			log.Infof("%s connected to us ", (*c).RemoteAddr())
+			log.Info().Msgf("%s connected to us ", (*c).RemoteAddr())
 			decoder := json.NewDecoder(*c)
 			var message string
 			err := decoder.Decode(&message)
 			if err != nil {
-				log.WithField("message", message).WithError(err).Error("Could not decode message, closing connection")
+				log.Error().Str("message", message).Err(err).Msg("Could not decode message, closing connection")
 				_ = (*c).Close()
 				return
 			}
 			if message == "ready for work" {
-				log.Debug("We have a new driver!")
+				log.Debug().Msg("We have a new driver!")
 				readyDrivers <- c
 				return
 			}
@@ -164,7 +161,7 @@ func main() {
 
 	}
 
-	log.Infof("Shutting down server")
+	log.Info().Msg("Shutting down server")
 }
 
 func scheduleTests(config common.Testconf) {
@@ -173,7 +170,7 @@ func scheduleTests(config common.Testconf) {
 
 	for testNumber, test := range config.Tests {
 
-		log.Debugf("Starting test %s", test.Name)
+		log.Debug().Msgf("Starting test %s", test.Name)
 
 		doneChannel := make(chan bool, test.Drivers)
 		resultChannel := make(chan common.BenchmarkResult, test.Drivers)
@@ -188,7 +185,7 @@ func scheduleTests(config common.Testconf) {
 				DriverID: fmt.Sprintf("d%d", driver),
 			}
 			driverConnection := <-readyDrivers
-			log.WithField("Driver", (*driverConnection).RemoteAddr()).Infof("We found driver %d / %d for test %d", driver+1, test.Drivers, testNumber)
+			log.Info().Any("Driver", (*driverConnection).RemoteAddr()).Msgf("We found driver %d / %d for test %d", driver+1, test.Drivers, testNumber)
 			go executeTestOnDriver(driverConnection, driverConfig, doneChannel, continueDrivers, resultChannel)
 		}
 		for driver := 0; driver < test.Drivers; driver++ {
@@ -197,7 +194,7 @@ func scheduleTests(config common.Testconf) {
 		}
 		// Add sleep after prep phase so that drives can relax
 		time.Sleep(5 * time.Second)
-		log.WithField("test", test.Name).Info("All drivers have finished preparations - starting performance test")
+		log.Info().Str("test", test.Name).Msg("All drivers have finished preparations - starting performance test")
 		startTime := time.Now().UTC()
 		for driver := 0; driver < test.Drivers; driver++ {
 			continueDrivers <- true
@@ -209,34 +206,34 @@ func scheduleTests(config common.Testconf) {
 			benchResults = append(benchResults, <-resultChannel)
 		}
 		stopTime := time.Now().UTC()
-		log.WithField("test", test.Name).Info("All drivers have finished the performance test - continuing with next test")
-		log.WithField("test", test.Name).Infof("GRAFANA: ?from=%d&to=%d", startTime.UnixNano()/int64(1000000), stopTime.UnixNano()/int64(1000000))
+		log.Info().Str("test", test.Name).Msg("All drivers have finished the performance test - continuing with next test")
+		log.Info().Str("test", test.Name).Msgf("GRAFANA: ?from=%d&to=%d", startTime.UnixNano()/int64(1000000), stopTime.UnixNano()/int64(1000000))
 		benchResult := sumBenchmarkResults(benchResults)
 		benchResult.StartTime = startTime
 		benchResult.StopTime = stopTime
-		log.WithField("test", test.Name).
-			WithField("Operation Name", benchResult.OperationName).
-			WithField("Drivers", benchResult.Workers).
-			WithField("Object Size", benchResult.ObjectSize).
-			WithField("Completed Operations", benchResult.Operations).
-			WithField("Failed Operations", benchResult.FailedOperations).
-			WithField("Ops Per Second", benchResult.OpsPerSecond).
-			WithField("Total Bytes", benchResult.Bytes).
-			WithField("Average BW in Byte/s", benchResult.Bandwidth).
-			WithField("Average RT latency in ms", benchResult.RTLatencyAvg).
-			WithField("Average TTFB latency in ms", benchResult.TTFBLatencyAvg).
-			WithField("Success Ratio", benchResult.SuccessRatio).
-			WithField("Start Time", benchResult.StartTime).
-			WithField("Stop Time", benchResult.StopTime).
-			WithField("Test runtime on server", benchResult.Duration).
-			Infof("PERF RESULTS")
+		log.Info().Str("test", test.Name).
+			Str("Operation Name", benchResult.OperationName).
+			Int("Drivers", benchResult.Workers).
+			Float64("Object Size", benchResult.ObjectSize).
+			Float64("Completed Operations", benchResult.Operations).
+			Float64("Failed Operations", benchResult.FailedOperations).
+			Float64("Ops Per Second", benchResult.OpsPerSecond).
+			Float64("Total Bytes", benchResult.Bytes).
+			Float64("Average BW in Byte/s", benchResult.Bandwidth).
+			Float64("Average RT latency in ms", benchResult.RTLatencyAvg).
+			Float64("Average TTFB latency in ms", benchResult.TTFBLatencyAvg).
+			Float64("Success Ratio", benchResult.SuccessRatio).
+			Time("Start Time", benchResult.StartTime).
+			Time("Stop Time", benchResult.StopTime).
+			Str("Test runtime on server", benchResult.Duration.String()).
+			Msg("PERF RESULTS")
 		writeResultToCSV(benchResult)
 		writeResultToConsole(benchResults, benchResult)
 		close(doneChannel)
 		close(continueDrivers)
 		close(resultChannel)
 	}
-	log.Info("All performance tests finished")
+	log.Info().Msg("All performance tests finished")
 	for driver := 0; driver < maxDrivers; driver++ {
 		driverConnection := <-readyDrivers
 		shutdownDriver(driverConnection)
@@ -254,11 +251,11 @@ func executeTestOnDriver(conn *net.Conn, config *common.DriverConf, doneChannel 
 	for {
 		err := decoder.Decode(&response)
 		if err != nil {
-			log.WithField("driver", config.DriverID).WithField("message", response).WithError(err).Error("Driver responded unusually - dropping")
+			log.Error().Str("driver", config.DriverID).Any("message", response).Err(err).Msg("Driver responded unusually - dropping")
 			_ = (*conn).Close()
 			return
 		}
-		log.Tracef("Response: %+v", response)
+		log.Trace().Msgf("Response: %+v", response)
 		switch response.Message {
 		case "preparations done":
 			doneChannel <- true
@@ -275,7 +272,7 @@ func executeTestOnDriver(conn *net.Conn, config *common.DriverConf, doneChannel 
 
 func shutdownDriver(conn *net.Conn) {
 	encoder := json.NewEncoder(*conn)
-	log.WithField("Driver", (*conn).RemoteAddr()).Info("Shutting down driver")
+	log.Info().Any("Driver", (*conn).RemoteAddr()).Msg("Shutting down driver")
 	_ = encoder.Encode(common.DriverMessage{Message: "shutdown"})
 }
 
@@ -313,7 +310,7 @@ func sumBenchmarkResults(results []common.BenchmarkResult) common.BenchmarkResul
 func writeResultToCSV(benchResult common.BenchmarkResult) {
 	file, created, err := getCSVFileHandle()
 	if err != nil {
-		log.WithError(err).Error("Could not get a file handle for the CSV results")
+		log.Error().Err(err).Msg("Could not get a file handle for the CSV results")
 		return
 	}
 	defer file.Close()
@@ -332,15 +329,15 @@ func writeResultToCSV(benchResult common.BenchmarkResult) {
 			"Total Bytes",
 			"Bandwidth in Bytes/s",
 			"Average RT Latency in ms",
-			"Average TTFB Latency in ms",
 			"Success Ratio",
 			"Start Time",
 			"Stop Time",
 			"Test duration seen by server in seconds",
 			"Test Options",
+			"Average TTFB Latency in ms",
 		})
 		if err != nil {
-			log.WithError(err).Error("Failed writing line to results csv")
+			log.Error().Err(err).Msg("Failed writing line to results csv")
 			return
 		}
 	}
@@ -356,15 +353,15 @@ func writeResultToCSV(benchResult common.BenchmarkResult) {
 		fmt.Sprintf("%.0f", benchResult.Bytes),
 		fmt.Sprintf("%f", benchResult.Bandwidth),
 		fmt.Sprintf("%f", benchResult.RTLatencyAvg),
-		fmt.Sprintf("%f", benchResult.TTFBLatencyAvg),
 		fmt.Sprintf("%.2f", benchResult.SuccessRatio),
 		fmt.Sprintf("%d", benchResult.StartTime.Unix()),
 		fmt.Sprintf("%d", benchResult.StopTime.Unix()),
 		fmt.Sprintf("%f", benchResult.Duration.Seconds()),
 		benchResult.Options,
+		fmt.Sprintf("%f", benchResult.TTFBLatencyAvg), // Added in 1.2.0
 	})
 	if err != nil {
-		log.WithError(err).Error("Failed writing line to results csv")
+		log.Error().Err(err).Msg("Failed writing line to results csv")
 		return
 	}
 
@@ -376,11 +373,11 @@ func getCSVFileHandle() (*os.File, bool, error) {
 	if testResultsOutputDir != "" {
 		pathInfo, err := os.Stat(testResultsOutputDir)
 		if err != nil {
-			log.Error("Unable to stat() results output directory, writing to current working directory")
+			log.Error().Msg("Unable to stat() results output directory, writing to current working directory")
 			testResultsOutputDir = ""
 		}
 		if !pathInfo.IsDir() {
-			log.Error("Results output loaction is not a directory, writing to current working directory")
+			log.Error().Msg("Results output loaction is not a directory, writing to current working directory")
 			testResultsOutputDir = ""
 		}
 	}
