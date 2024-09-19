@@ -32,6 +32,7 @@ type S3Configuration struct {
 	Timeout       time.Duration `yaml:"timeout" json:"timeout"`
 	SkipSSLVerify bool          `yaml:"skipSSLverify" json:"skipSSLverify"`
 	ProxyHost     string        `yaml:"proxyHost" json:"proxyHost"`
+	UsePathStyle  bool          `yaml:"usePathStyle" json:"usePathStyle"`
 }
 
 // GrafanaConfiguration contains all information necessary to add annotations

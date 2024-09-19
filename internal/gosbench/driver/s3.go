@@ -102,6 +102,7 @@ func InitS3(s3Config common.S3Configuration) {
 
 	svc = s3.NewFromConfig(workerCfg, func(o *s3.Options) {
 		o.BaseEndpoint = aws.String(s3Config.Endpoint)
+		o.UsePathStyle = s3Config.UsePathStyle
 	})
 
 	// Setting up the housekeeping S3 client
@@ -119,6 +120,7 @@ func InitS3(s3Config common.S3Configuration) {
 	}
 	HousekeepingSvc = s3.NewFromConfig(hkCfg, func(o *s3.Options) {
 		o.BaseEndpoint = aws.String(s3Config.Endpoint)
+		o.UsePathStyle = s3Config.UsePathStyle
 	})
 
 	// TODO Create a context with a timeout - we already use this context in all S3 calls
