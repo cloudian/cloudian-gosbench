@@ -94,6 +94,9 @@ func InitS3(s3Config common.S3Configuration) {
 		config.WithHTTPClient(workerHTTPClient),
 		config.WithRegion(s3Config.Region),
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(s3Config.AccessKey, s3Config.SecretKey, "")),
+		config.WithRetryer(func() aws.Retryer {
+			return aws.NopRetryer{}
+		}),
 	)
 
 	if err != nil {
