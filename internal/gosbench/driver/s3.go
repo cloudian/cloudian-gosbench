@@ -215,12 +215,10 @@ func getObject(service *s3.Client, objectName string, bucket string) error {
 
 	if err == nil {
 		_, err = io.Copy(DiscardWriterAt{}, obj.Body)
+		defer obj.Body.Close()
 	}
 
-	defer obj.Body.Close()
-
 	return err
-
 }
 
 func deleteObject(service *s3.Client, objectName string, bucket string) error {

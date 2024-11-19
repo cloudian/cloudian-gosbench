@@ -300,7 +300,7 @@ func fillWorkqueue(testConfig *common.TestCaseConfiguration, Workqueue *driver.W
 		var preExistingReadObjectCount uint64
 		var preExistingReadObjectIndex uint64
 		if testConfig.ExistingReadWeight > 0 {
-			preExistingReadObjects, err = driver.ListObjectsV2(driver.HousekeepingSvc, objectDriverPrefix, bucketName)
+			preExistingReadObjects, err = driver.ListObjectsV2(driver.HousekeepingSvc, testConfig.ObjectPrefix, bucketName)
 			preExistingReadObjectCount = uint64(len(preExistingReadObjects))
 
 			if err != nil {
